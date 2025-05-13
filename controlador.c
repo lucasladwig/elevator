@@ -1,0 +1,1 @@
+// incluir logica da thread controladora (scheduler)
