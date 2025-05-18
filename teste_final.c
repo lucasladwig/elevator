@@ -4,67 +4,83 @@
 #include <semaphore.h>
 #include <unistd.h>
 #include <time.h>
-#include <limits.h>
 
-/* ======================================================================
- * DEFINIÇÕES E CONSTANTES
- * ====================================================================== */
-#define MAX_CALLS 100      // Número máximo de chamadas
-#define MAX_ELEVATORS 10   // Número máximo de elevadores
-#define MAX_FLOORS 100     // Número máximo de andares
+/* ===== DEFINIÇÕES E CONSTANTES ===== */
+#define MAX_CHAMADAS 100    // Número máximo de chamadas
+#define MAX_ELEVADORES 10   // Número máximo de elevadores
+#define MAX_ANDARES 100     // Número máximo de andares
+#define TRUE 1
+#define FALSE 0 
 
-/* ======================================================================
- * ESTRUTURAS DE DADOS
- * ====================================================================== */
-/**
- * Representa uma chamada de elevador
- */
+/* ===== ESTRUTURAS DE DADOS ===== */
+// Representa uma chamada de elevador
 typedef struct {
     int origem;    // Andar de origem da chamada
     int destino;   // Andar de destino da chamada
     int atendida;  // Flag indicando se a chamada já foi atendida (0=não, 1=sim)
 } Chamada;
 
-/**
- * Representa um elevador
- */
+// Representa um elevador
 typedef struct {
-    int id;
-    int andar_atual;
-    int chamadas_atendidas;
+    int id;             // Identificador do elevador
+    int andar_atual;    // Andar atual onde o elevador se encontra
+    pthread_mutex_t mutex_elevador; // Protege as alteracoes de estado do elevador
 } Elevador;
 
-/* ======================================================================
- * VARIÁVEIS GLOBAIS
- * ====================================================================== */
+
+/* ===== VARIÁVEIS GLOBAIS ===== */
 // Parâmetros da simulação (definidos pelo usuário)
 int n_andares;          // Número total de andares no edifício
 int m_elevadores;       // Número total de elevadores no edifício
 int total_chamadas;     // Número total de chamadas a serem geradas
 
 // Estado da simulação
-Chamada chamadas[MAX_CALLS];        // Lista de todas as chamadas
+Chamada chamadas[MAX_CHAMADAS];        // Lista de todas as chamadas
 int chamadas_pendentes = 0;         // Contador de chamadas criadas
-Elevador elevadores[MAX_ELEVATORS]; // Estado dos elevadores
+Elevador elevadores[MAX_ELEVADORES]; // Estado dos elevadores
 
 // Mecanismos de sincronização
-pthread_mutex_t mutex_chamadas;     // Mutex para proteger o acesso às chamadas
-pthread_mutex_t mutex_elevadores;
-sem_t sem_chamadas;                 // Semáforo para sinalizar novas chamadas (Produtor-Consumidor)
+pthread_mutex_t mutex_chamadas;     // Mutex para proteger o acesso ao buffer de chamadas
+sem_t sem_chamadas;                 // Semáforo do buffer de chamadas
 
-/* ======================================================================
- * IMPLEMENTAÇÃO DO PADRÃO PRODUTOR-CONSUMIDOR
- * ====================================================================== */
-/**
- * Thread que representa um andar (PRODUTOR)
- * Gera chamadas aleatórias de elevador
- */
+
+
+/* ===== PADRÃO SCHEDULER ===== */
+// Implementa o algoritmo de escalonamento para escolher o elevador mais próximo
+int escolher_elevador(int origem) {
+    int menor_distancia = MAX_ANDARES;
+    int escolhidos[MAX_ELEVADORES];
+    int contador = 0;
+
+    // Encontra o(s) elevador(es) mais próximo(s)
+    for (int i = 0; i < m_elevadores; i++) {
+        int distancia = abs(elevadores[i].andar_atual - origem);
+        
+        if (distancia < menor_distancia) {
+            // Encontrou elevador mais próximo - limpa lista anterior
+            menor_distancia = distancia;
+            contador = 0;  // Reset do contador para começar uma nova lista
+            escolhidos[contador++] = i;
+        } 
+        else if (distancia == menor_distancia) {
+            // Elevador com mesma distância - adiciona à lista de candidatos
+            escolhidos[contador++] = i;
+        }
+    }
+
+    // Se houver múltiplos elevadores na mesma distância, escolhe um aleatoriamente
+    return escolhidos[rand() % contador];
+}
+
+
+/* ===== PADRÃO PRODUTOR-CONSUMIDOR ===== */
+// PRODUTOR: Thread que representa um andar (Gera chamadas aleatórias de elevador)
 void* thread_andar(void* arg) {
     int id = *(int*)arg;
     free(arg); // Libera a memória alocada para o ID
     
     // Loop principal de geração de chamadas
-    while (1) {
+    while (TRUE) {
         // Seção crítica - acesso à lista de chamadas
         pthread_mutex_lock(&mutex_chamadas);
         
@@ -100,46 +116,8 @@ void* thread_andar(void* arg) {
     return NULL;
 }
 
-/* ======================================================================
- * IMPLEMENTAÇÃO DO PADRÃO SCHEDULER
- * ====================================================================== */
-/**
- * Implementa o algoritmo de escalonamento para escolher o elevador mais próximo
- * @param origem Andar de origem da chamada
- * @return ID do elevador escolhido
- */
-int escolher_elevador(int origem) {
-    int menor_distancia = INT_MAX;
-    int escolhidos[MAX_ELEVATORS];
-    int count = 0;
 
-    pthread_mutex_lock(&mutex_elevadores);
-    // Encontra o(s) elevador(es) mais próximo(s)
-    for (int i = 0; i < m_elevadores; i++) {
-        int distancia = abs(elevadores[i].andar_atual - origem);
-        
-        if (distancia < menor_distancia) {
-            // Encontrou elevador mais próximo - limpa lista anterior
-            menor_distancia = distancia;
-            count = 0;  // Reset do contador para começar uma nova lista
-            escolhidos[count++] = i;
-        } 
-        else if (distancia == menor_distancia) {
-            // Elevador com mesma distância - adiciona à lista de candidatos
-            escolhidos[count++] = i;
-        }
-    }
-    pthread_mutex_unlock(&mutex_elevadores);
-
-
-    // Se houver múltiplos elevadores na mesma distância, escolhe um aleatoriamente
-    return escolhidos[rand() % count];
-}
-
-/**
- * Thread que representa um elevador (CONSUMIDOR)
- * Atende às chamadas geradas pelos andares
- */
+// CONSUMIDOR: Thread que representa um elevador (atende às chamadas geradas pelos andares)
 void* thread_elevador(void* arg) {
     int id = *(int*)arg;
     free(arg); // Libera a memória alocada para o ID
@@ -147,12 +125,13 @@ void* thread_elevador(void* arg) {
     // Inicializa o estado do elevador
     elevadores[id].id = id;
     elevadores[id].andar_atual = 0;  // Todos elevadores começam no térreo
-    elevadores[id].chamadas_atendidas = 0;  // Todos elevadores começam no térreo
-    
+
+    pthread_mutex_init(&elevadores[id].mutex_elevador, NULL);  // Inicializa mutex do elevador
+        
     printf("[Elevador %d] Iniciado no andar 0\n\n", id);
 
     // Loop principal de atendimento às chamadas
-    while (1) {
+    while (TRUE) {
         // Espera ser sinalizado que há uma chamada disponível
         sem_wait(&sem_chamadas);
         
@@ -166,7 +145,7 @@ void* thread_elevador(void* arg) {
                 // Usa o Scheduler para decidir qual elevador deve atender
                 int escolhido = escolher_elevador(chamadas[i].origem);
                 
-                if (escolhido == id) {
+                if (escolhido == id) {                    
                     chamadas[i].atendida = 1;
                     encontrada = i;
                     break;
@@ -177,78 +156,55 @@ void* thread_elevador(void* arg) {
         // Fim da seção crítica
         pthread_mutex_unlock(&mutex_chamadas);
 
+        // Atende a chamada encontrada
         if (encontrada != -1) {
-            // Atende a chamada encontrada
-
             Chamada c = chamadas[encontrada];
+            int distancia_para_atender = abs(elevadores[id].andar_atual - c.origem);
+            printf("[Elevador %d] Atendendo chamada de %d para %d\n", 
+                id, c.origem, c.destino, distancia_para_atender);
+            usleep(500);
             
-            elevadores[id].chamadas_atendidas++;
-
-            printf("[Elevador %d] Atendendo chamada: de %d para %d (distância: %d andares)\n", 
-                id, c.origem, c.destino, abs(elevadores[id].andar_atual - c.origem));
-            
-
             // Desloca para o andar de origem
-            printf("[Elevador %d] Movendo do andar %d para andar %d (origem)\n", 
+            if (elevadores[id].andar_atual != c.origem) {
+                printf("[Elevador %d] Movendo do andar %d para andar %d (origem da chamada)\n", 
                 id, elevadores[id].andar_atual, c.origem);
-            sleep(abs(elevadores[id].andar_atual - c.origem));  // Tempo proporcional à distância
+            }
+                        
+            sleep(distancia_para_atender);  // Tempo proporcional à distância
             
-            pthread_mutex_lock(&mutex_elevadores);
-            elevadores[id].andar_atual = c.origem;
-            pthread_mutex_unlock(&mutex_elevadores);
-            
-            printf("[Elevador %d] Chegou ao andar de origem %d\n", id, c.origem);
+            // Atualiza andar atual do elevador
+            pthread_mutex_lock(&elevadores[id].mutex_elevador);
+            elevadores[id].andar_atual = c.origem; 
+            pthread_mutex_unlock(&elevadores[id].mutex_elevador);
+                        
+            printf("[Elevador %d] Chegou ao andar de origem da chamada %d\n", id, c.origem);
             
             // Desloca para o andar de destino
             printf("[Elevador %d] Movendo do andar %d para andar %d (destino)\n", 
                 id, c.origem, c.destino);
-            sleep(abs(c.origem - c.destino));  // Tempo proporcional à distância
+            int distancia_viagem = abs(c.origem - c.destino);
+            sleep(distancia_viagem);  // Tempo proporcional à distância
+            
+            // Atualiza andar atual do elevador
+            pthread_mutex_lock(&elevadores[id].mutex_elevador);
+            elevadores[id].andar_atual = c.origem; 
+            pthread_mutex_unlock(&elevadores[id].mutex_elevador);
 
-            pthread_mutex_lock(&mutex_elevadores);
-            elevadores[id].andar_atual = c.destino;
-            pthread_mutex_unlock(&mutex_elevadores);
-
-            printf("[Elevador %d] Chegou ao destino %d\n\n", id, c.destino);
+            printf("[Elevador %d] Chegou ao destino %d\n", id, c.destino);
         } 
-        // else {
-        //     // Nenhuma chamada para este elevador, devolve semáforo
-        //     sem_post(&sem_chamadas);
-        //     break;
-        // }
-
         else {
-            // Nenhuma chamada atribuída, verifica se ainda há chamadas não atendidas
-            pthread_mutex_lock(&mutex_chamadas);
-            int ainda_tem_chamadas = 0;
-            for (int i = 0; i < chamadas_pendentes; i++) {
-                if (!chamadas[i].atendida) {
-                    ainda_tem_chamadas = 1;
-                    break;
-                }
-            }
-            pthread_mutex_unlock(&mutex_chamadas);
-        
-            if (ainda_tem_chamadas) {
-                // Ainda tem chamadas, volta para o loop
-                sem_post(&sem_chamadas);  // Devolve o semáforo para outro elevador
-                continue;
-            } else {
-                // Nada mais para fazer, encerra
-                break;
-            }
+            // Nenhuma chamada para este elevador, devolve semáforo
+            sem_post(&sem_chamadas);
+            break;
         }
-        
-
-        sleep(rand() % 3 + 1);
     }
     
-    printf("[Elevador %d] Encerrado no andar %d\n", id, elevadores[id].andar_atual);
+    printf("[Elevador %d] Encerrado no andar %d\n\n", id, elevadores[id].andar_atual);
     return NULL;
 }
 
-/* ======================================================================
- * FUNÇÃO PRINCIPAL
- * ====================================================================== */
+
+/* ===== FUNÇÃO PRINCIPAL ===== */
 int main(int argc, char* argv[]) {
     // Verificação dos argumentos de linha de comando
     if (argc != 4) {
@@ -271,16 +227,16 @@ int main(int argc, char* argv[]) {
     printf("Total de %d chamadas a serem atendidas\n\n", total_chamadas);
 
     // Validação dos parâmetros
-    if (n_andares <= 0 || n_andares > MAX_FLOORS) {
-        printf("Erro: número de andares deve estar entre 1 e %d\n", MAX_FLOORS);
+    if (n_andares <= 0 || n_andares > MAX_ANDARES) {
+        printf("Erro: número de andares deve estar entre 1 e %d\n", MAX_ANDARES);
         return 1;
     }
-    if (m_elevadores <= 0 || m_elevadores > MAX_ELEVATORS) {
-        printf("Erro: número de elevadores deve estar entre 1 e %d\n", MAX_ELEVATORS);
+    if (m_elevadores <= 0 || m_elevadores > MAX_ELEVADORES) {
+        printf("Erro: número de elevadores deve estar entre 1 e %d\n", MAX_ELEVADORES);
         return 1;
     }
-    if (total_chamadas <= 0 || total_chamadas > MAX_CALLS) {
-        printf("Erro: número de chamadas deve estar entre 1 e %d\n", MAX_CALLS);
+    if (total_chamadas <= 0 || total_chamadas > MAX_CHAMADAS) {
+        printf("Erro: número de chamadas deve estar entre 1 e %d\n", MAX_CHAMADAS);
         return 1;
     }
 
@@ -334,19 +290,8 @@ int main(int argc, char* argv[]) {
     printf("Todas as %d chamadas foram atendidas com sucesso.\n", total_chamadas);
     printf("Posição final dos elevadores:\n");
     for (int i = 0; i < m_elevadores; i++) {
-        printf("- Elevador %d: andar %d\n", elevadores[i].id, elevadores[i].andar_atual);
-        printf("- Elevador %d: chamadas atendidas: %d\n", elevadores[i].id, elevadores[i].chamadas_atendidas);
+        printf("- Elevador %d: andar %d\n", i, elevadores[i].andar_atual);
     }
-
-    int perdidas = 0;
-    for (int i = 0; i < chamadas_pendentes; i++) {
-        if (!chamadas[i].atendida) {
-            printf("Chamada perdida: origem=%d destino=%d\n", chamadas[i].origem, chamadas[i].destino);
-            perdidas++;
-        }
-    }
-    printf("Total de chamadas perdidas: %d\n", perdidas);
-
     
     return 0;
 }
